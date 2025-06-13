@@ -1,0 +1,4 @@
+streamlit
+llama-index==0.10.28
+openai
+PyMuPDF
