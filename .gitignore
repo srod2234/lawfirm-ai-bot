@@ -1,7 +1,12 @@
+# Environment variables
+.env
+
+# Python virtual environment
 venv/
+
+# Compiled files
 __pycache__/
 *.pyc
-.DS_Store
-.env
-*.sqlite3
 
+# OS-specific files
+.DS_Store
