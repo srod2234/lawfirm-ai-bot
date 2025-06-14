@@ -1,6 +1,9 @@
 streamlit
-llama-index==0.10.28
-PyMuPDF
-openai
-python-dotenv
 streamlit-authenticator
+openai
+llama-index
+PyMuPDF
+python-dotenv
+bcrypt
+sqlmodel
+psycopg2-binary
