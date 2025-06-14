@@ -1,73 +1,77 @@
-# app.py – Secure multi-doc legal assistant (June 2025 compatible)
-import os, fitz, streamlit as st
+import os
 from dotenv import load_dotenv
+
+import streamlit as st
 import streamlit_authenticator as stauth
+import fitz  # PyMuPDF
+import openai
+
 from llama_index.core import VectorStoreIndex, Document, ServiceContext
 from llama_index.embeddings.openai import OpenAIEmbedding
 
-# ─────────────────────  ENV & AUTH  ─────────────────────
-load_dotenv()
-st.write("Loaded username:", os.getenv("AUTH_USERNAME"))
-st.write("Loaded hash:", os.getenv("AUTH_PASSWORD_HASH"))
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-AUTH_USER = os.getenv("AUTH_USERNAME", "demo")
-AUTH_HASH = os.getenv("AUTH_PASSWORD_HASH", "")
+# ─────── Page Configuration ───────
+st.set_page_config(page_title="Legal PDF Assistant", layout="wide")
 
-import openai
-openai.api_key = OPENAI_KEY
+# ─────── Load ENV & Clean Values ───────
+load_dotenv(override=True)
 
-# --- Authenticator setup ---
+AUTH_USERNAME      = os.getenv("AUTH_USERNAME", "demo").strip().strip("'\"")
+AUTH_PASSWORD_HASH = os.getenv("AUTH_PASSWORD_HASH", "").strip().strip("'\"")
+COOKIE_KEY         = os.getenv("COOKIE_KEY", "").strip().strip("'\"")
+OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY", "").strip()
+
+if not OPENAI_API_KEY:
+    st.error("⚠️ OPENAI_API_KEY not set.")
+    st.stop()
+
+openai.api_key = OPENAI_API_KEY
+
+# ─────── Auth Setup ───────
 credentials = {
     "usernames": {
-        AUTH_USER: {
-            "name": "Legal-User",
-            "password": AUTH_HASH,
-        }
+        AUTH_USERNAME: {"name": AUTH_USERNAME, "password": AUTH_PASSWORD_HASH}
     }
 }
+
 authenticator = stauth.Authenticate(
-    credentials,
-    "lawbot_cookie", "abcdef", cookie_expiry_days=1
+    credentials=credentials,
+    cookie_name="law_firm_ai_session",
+    key=COOKIE_KEY,
+    cookie_expiry_days=1,
+    preauthorized=[]
 )
 
-# 🚩 LOGIN (new API: returns only auth_status)
-auth_status = authenticator.login(location="main")
+# ─────── Login ───────
+auth_status = authenticator.login("main")
 
-if auth_status is False:
-    st.error("Invalid credentials")
+if auth_status:
+    st.sidebar.success(f"Welcome, {AUTH_USERNAME}!")
+elif auth_status is False:
+    st.error("❌ Username/password is incorrect")
     st.stop()
-elif auth_status is None:
-    st.warning("Please enter username & password")
+else:
+    st.warning("ℹ️ Please enter your credentials")
     st.stop()
 
-# --- Get username for greeting (may be None)
-user = getattr(authenticator, "username", None) or getattr(authenticator, "name", None)
-
-# ─────────────────────  STREAMLIT UI  ─────────────────────
-st.set_page_config(page_title="Legal PDF Assistant", layout="wide")
-st.sidebar.title(f"👋 Hi {user or 'user'}")
-
-# --- session state init
-for key, default in {
-    "docs": {},
-    "chat": {},
-    "last_doc": None,
-}.items():
+# ─────── Session State ───────
+for key, default in {"docs": {}, "chat": {}, "last_doc": None}.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# --- Sidebar: upload & doc management
+# ─────── Sidebar: Document Management ───────
+st.sidebar.title(f"👋 Hi {AUTH_USERNAME}")
 st.sidebar.header("📁 Documents")
-uploaded = st.sidebar.file_uploader("Upload PDF", type="pdf")
+
+uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
 label = st.sidebar.text_input("Label for this PDF")
 
-def extract_text(file):
-    doc = fitz.open(stream=file.read(), filetype="pdf")
-    return "".join(p.get_text() for p in doc)
+def extract_text(file) -> str:
+    pdf = fitz.open(stream=file.read(), filetype="pdf")
+    return "".join(page.get_text() for page in pdf)
 
-if uploaded and st.sidebar.button("Save PDF"):
+if uploaded_file and st.sidebar.button("Save PDF"):
     with st.spinner("Indexing…"):
-        text = extract_text(uploaded)
+        text = extract_text(uploaded_file)
         docs = [Document(text=text)]
         idx = VectorStoreIndex.from_documents(
             docs,
@@ -77,11 +81,10 @@ if uploaded and st.sidebar.button("Save PDF"):
         st.session_state.chat[label] = []
         st.success(f"Saved '{label}'")
 
-# --- List & manage docs
 for lbl in list(st.session_state.docs.keys()):
     with st.sidebar.expander(lbl):
         if st.button("👁 Preview", key=f"prev_{lbl}"):
-            st.sidebar.text_area("Preview", st.session_state.docs[lbl]["text"][:800]+"…", height=180)
+            st.sidebar.text_area("Preview", st.session_state.docs[lbl]["text"][:800] + "…", height=180)
         if st.button("♻️ Reset Chat", key=f"reset_{lbl}"):
             st.session_state.chat[lbl] = []
             st.session_state.last_doc = lbl
@@ -92,14 +95,13 @@ for lbl in list(st.session_state.docs.keys()):
             st.session_state.last_doc = None
             st.rerun()
 
-# --- Select & chat with doc
+# ─────── Main: Chat Interface ───────
 if st.session_state.docs:
-    selected = st.selectbox("Choose a document to chat with:", st.session_state.docs.keys())
+    selected = st.selectbox("Choose a document to chat with:", list(st.session_state.docs.keys()))
     st.session_state.last_doc = selected
     doc_data = st.session_state.docs[selected]
     q_engine = doc_data["index"].as_query_engine(response_mode="compact", return_source=True)
 
-    # Show chat history
     for q, a, src in st.session_state.chat[selected]:
         st.markdown(f"**You:** {q}")
         st.markdown(f"**Bot:** {a}")
@@ -108,7 +110,6 @@ if st.session_state.docs:
                 st.code(node.node.get_text().strip(), language="markdown")
         st.markdown("---")
 
-    # New question
     question = st.text_input("Ask a question:")
     if question:
         with st.spinner("Thinking…"):
@@ -122,5 +123,4 @@ if st.session_state.docs:
         st.markdown("---")
         st.session_state.chat[selected].append((question, answer, sources))
 else:
-    st.info("Upload a PDF to begin.")  
-    
+    st.info("Upload a PDF to begin.")
