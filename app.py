@@ -27,7 +27,7 @@ authenticator = stauth.Authenticate(
     credentials,
     "lawbot_cookie", "abcdef", cookie_expiry_days=1
 )
-name, auth_status, _ = authenticator.login("Login", location="main")
+name, auth_status, _ = authenticator.login(location="main")
 
 if auth_status is False:
     st.error("Invalid credentials")
