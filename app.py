@@ -1,4 +1,4 @@
-# app.py – Secure multi-doc legal assistant
+# app.py – Secure multi-doc legal assistant (June 2025 compatible)
 import os, fitz, streamlit as st
 from dotenv import load_dotenv
 import streamlit_authenticator as stauth
@@ -27,7 +27,9 @@ authenticator = stauth.Authenticate(
     credentials,
     "lawbot_cookie", "abcdef", cookie_expiry_days=1
 )
-name, auth_status, _ = authenticator.login(location="main")
+
+# 🚩 LOGIN (new API: returns only auth_status)
+auth_status = authenticator.login(location="main")
 
 if auth_status is False:
     st.error("Invalid credentials")
@@ -36,9 +38,12 @@ elif auth_status is None:
     st.warning("Please enter username & password")
     st.stop()
 
+# --- Get username for greeting (may be None)
+user = getattr(authenticator, "username", None) or getattr(authenticator, "name", None)
+
 # ─────────────────────  STREAMLIT UI  ─────────────────────
 st.set_page_config(page_title="Legal PDF Assistant", layout="wide")
-st.sidebar.title(f"👋 Hi {name}")
+st.sidebar.title(f"👋 Hi {user or 'user'}")
 
 # --- session state init
 for key, default in {
