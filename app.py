@@ -7,6 +7,8 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 
 # ─────────────────────  ENV & AUTH  ─────────────────────
 load_dotenv()
+st.write("Loaded username:", os.getenv("AUTH_USERNAME"))
+st.write("Loaded hash:", os.getenv("AUTH_PASSWORD_HASH"))
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 AUTH_USER = os.getenv("AUTH_USERNAME", "demo")
 AUTH_HASH = os.getenv("AUTH_PASSWORD_HASH", "")
@@ -120,4 +122,5 @@ if st.session_state.docs:
         st.markdown("---")
         st.session_state.chat[selected].append((question, answer, sources))
 else:
-    st.info("Upload a PDF to begin.")
+    st.info("Upload a PDF to begin.")  
+    
