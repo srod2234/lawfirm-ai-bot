@@ -6,7 +6,10 @@ import streamlit_authenticator as stauth
 import fitz  # PyMuPDF
 import openai
 
-from llama_index.core import VectorStoreIndex, Document, ServiceContext
+from sqlmodel import Session
+from models import init_db, engine, Document as DocModel
+
+from llama_index.core import VectorStoreIndex, Document
 from llama_index.embeddings.openai import OpenAIEmbedding
 
 # ───── Page Configuration ─────
@@ -19,8 +22,11 @@ AUTH_PASSWORD_HASH = os.getenv("AUTH_PASSWORD_HASH", "").strip()
 COOKIE_KEY         = os.getenv("COOKIE_KEY", "").strip()
 OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY", "").strip()
 
+# ───── Initialize Database ─────
+init_db()
+
 if not OPENAI_API_KEY:
-    st.error("⚠️ OPENAI_API_KEY not set.")
+    st.error("⚠️ OPENAI_API_KEY not set in .env or Railway")
     st.stop()
 openai.api_key = OPENAI_API_KEY
 
@@ -62,46 +68,62 @@ st.sidebar.header("📁 Documents")
 uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
 label = st.sidebar.text_input("Label for this PDF")
 
-def extract_text(file) -> str:
-    pdf = fitz.open(stream=file.read(), filetype="pdf")
+def extract_text(stream) -> str:
+    pdf = fitz.open(stream=stream.read(), filetype="pdf")
     return "".join(page.get_text() for page in pdf)
 
 if uploaded_file and st.sidebar.button("Save PDF"):
-    with st.spinner("Indexing…"):
-        text = extract_text(uploaded_file)
-        docs = [Document(text=text)]
-        idx = VectorStoreIndex.from_documents(
-            docs,
-            service_context=ServiceContext.from_defaults(embed_model=OpenAIEmbedding())
-        )
-        st.session_state.docs[label] = {"text": text, "index": idx}
-        st.session_state.chat[label] = []
-        st.success(f"Saved '{label}'")
+    with st.spinner("Saving & indexing…"):
+        # 1) Persist PDF to disk
+        os.makedirs("uploads", exist_ok=True)
+        path = f"uploads/{label}.pdf"
+        with open(path, "wb") as f:
+            f.write(uploaded_file.read())
 
-# Manage saved docs
+        # 2) Insert Document row
+        with Session(engine) as db:
+            doc = DocModel(owner_id=1, label=label, file_path=path)
+            db.add(doc)
+            db.commit()
+            db.refresh(doc)
+
+        # 3) Build and cache your index using the new API signature
+        text = extract_text(open(path, "rb"))
+        idx = VectorStoreIndex.from_documents(
+            [Document(text=text)],
+            embed_model=OpenAIEmbedding()
+        )
+
+        # Store the index in session for now
+        st.session_state.docs[label] = {"db_id": doc.id, "text": text, "index": idx}
+        st.session_state.chat[label] = []
+
+        st.success(f"📥 Saved '{label}' (db id={doc.id})")
+
+# ───── Manage Saved Docs ─────
 for lbl in list(st.session_state.docs.keys()):
     with st.sidebar.expander(lbl):
         if st.button("👁 Preview", key=f"prev_{lbl}"):
             st.sidebar.text_area(
                 "Preview",
                 st.session_state.docs[lbl]["text"][:800] + "…",
-                height=180,
+                height=180
             )
         if st.button("♻️ Reset Chat", key=f"reset_{lbl}"):
             st.session_state.chat[lbl] = []
             st.session_state.last_doc = lbl
-            st.stop()  # page will reload with chat cleared
+            st.stop()
         if st.button("🗑 Delete", key=f"del_{lbl}"):
             del st.session_state.docs[lbl]
             st.session_state.chat.pop(lbl, None)
             st.session_state.last_doc = None
-            st.stop()  # page will reload without that doc
+            st.stop()
 
 # ───── Main: Chat Interface ─────
 if st.session_state.docs:
     selected = st.selectbox(
         "Choose a document to chat with:",
-        list(st.session_state.docs.keys()),
+        list(st.session_state.docs.keys())
     )
     st.session_state.last_doc = selected
     doc_data = st.session_state.docs[selected]
