@@ -1,9 +1,10 @@
 # models.py
+
 import os
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
-from sqlmodel import SQLModel, Field, create_engine
+from sqlmodel import SQLModel, Field, Relationship, create_engine
 
 # Use Postgres in prod; else fall back to a local SQLite file
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///local.db")
@@ -21,24 +22,24 @@ class Document(SQLModel, table=True):
     file_path: str
     uploaded_at: datetime = Field(default_factory=datetime.utcnow)
 
+    # Relationship to pages
+    pages: List["Page"] = Relationship(back_populates="document")
+
+class Page(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    document_id: int = Field(foreign_key="document.id")
+    page_number: int
+    text: str
+    is_scanned: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    document: Optional[Document] = Relationship(back_populates="pages")
+
 class ChatMessage(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     doc_id: int = Field(foreign_key="document.id")
     question: str
     answer: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-
-class OCRText(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    doc_id: int = Field(foreign_key="document.id")
-    page_num: int
-    text: str
-
-class AnalyticsEvent(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    user_id: int = Field(foreign_key="user.id")
-    event_type: str
-    doc_id: Optional[int] = Field(default=None, foreign_key="document.id")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 def init_db():
