@@ -1,0 +1,5 @@
+# nixpacks.toml
+
+[packages]
+# Install the system tesseract binary so pytesseract actually works
+tesseract = "tesseract"
