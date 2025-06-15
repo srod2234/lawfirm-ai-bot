@@ -77,17 +77,14 @@ for doc in all_docs:
     label = doc.label
     if label in st.session_state.docs:
         continue
-    # Load pages (legacy or OCR) for indexing
     pages = db.exec(
         select(Page).where(Page.document_id == doc.id).order_by(Page.page_number)
     ).all()
     if not pages:
-        # fallback to legacy text extraction
         text = extract_text_from_path(doc.file_path).strip()
         if not text:
             continue
         pages = [Page(document_id=doc.id, page_number=1, text=text, is_scanned=False)]
-    # Build index
     chunks = [LIDoc(text=pg.text) for pg in pages if pg.text.strip()]
     if not chunks:
         continue
@@ -114,11 +111,9 @@ if uploaded_file and label and st.sidebar.button("Save PDF"):
     with open(path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    # Ingest via unified pipeline (handles text + scanned)
     with st.spinner("Parsing PDF & running OCR…"):
         doc_id = ingest_pdf(path, owner_id=1)
 
-    # Reload pages
     with Session(engine) as db:
         pages = db.exec(
             select(Page).where(Page.document_id == doc_id).order_by(Page.page_number)
@@ -151,11 +146,11 @@ for lbl in list(st.session_state.docs.keys()):
                 db.commit()
             st.session_state.chat[lbl] = []
             st.success("🔄 Chat cleared!")
-            st.experimental_rerun()
+            # No rerun needed; Streamlit will re-render automatically
+
         if st.button("🗑 Delete", key=f"del_{lbl}"):
             doc_id = st.session_state.docs[lbl]["db_id"]
             with Session(engine) as db:
-                # fetch file_path
                 doc = db.exec(select(DocModel).where(DocModel.id == doc_id)).one_or_none()
                 file_path = doc.file_path if doc else None
                 db.exec(delete(Page).where(Page.document_id == doc_id))
@@ -171,7 +166,7 @@ for lbl in list(st.session_state.docs.keys()):
             del st.session_state.chat[lbl]
             st.session_state.last_doc = None
             st.success(f"🗑 Deleted '{lbl}' and all data")
-            st.experimental_rerun()
+            # No rerun needed; Streamlit will re-render automatically
 
 # ───── Main: Chat Interface ─────
 if st.session_state.docs:
