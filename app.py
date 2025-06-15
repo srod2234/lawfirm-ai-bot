@@ -77,10 +77,12 @@ for doc in all_docs:
     label = doc.label
     if label in st.session_state.docs:
         continue
+    # Load pages for indexing
     pages = db.exec(
         select(Page).where(Page.document_id == doc.id).order_by(Page.page_number)
     ).all()
     if not pages:
+        # fallback to legacy text extraction
         text = extract_text_from_path(doc.file_path).strip()
         if not text:
             continue
@@ -106,32 +108,18 @@ uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
 label = st.sidebar.text_input("Label for this PDF")
 
 if uploaded_file and label and st.sidebar.button("Save PDF"):
+    # 1) Save file
     os.makedirs("uploads", exist_ok=True)
     path = f"uploads/{label}.pdf"
     with open(path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
+    # 2) Ingest the PDF (text or scanned)
     with st.spinner("Parsing PDF & running OCR…"):
-        doc_id = ingest_pdf(path, owner_id=1)
+        ingest_pdf(path, owner_id=1)
 
-    with Session(engine) as db:
-        pages = db.exec(
-            select(Page).where(Page.document_id == doc_id).order_by(Page.page_number)
-        ).all()
-    pages = [pg for pg in pages if pg.text.strip()]
-    if not pages:
-        st.error("No text found—cannot build index.")
-    else:
-        chunks = [LIDoc(text=pg.text) for pg in pages]
-        try:
-            idx = VectorStoreIndex.from_documents(chunks, embed_model=OpenAIEmbedding())
-        except ValueError:
-            st.error("Indexing failed: no content.")
-            idx = None
-        if idx:
-            st.session_state.docs[label] = {"db_id": doc_id, "pages": pages, "index": idx}
-            st.session_state.chat[label] = []
-            st.success(f"📥 Saved & OCR’d '{label}' (db id={doc_id})")
+    # 3) Rerun so startup logic picks up exactly one new doc
+    st.experimental_rerun()
 
 # ───── Sidebar: Manage Saved Docs ─────
 for lbl in list(st.session_state.docs.keys()):
@@ -146,8 +134,6 @@ for lbl in list(st.session_state.docs.keys()):
                 db.commit()
             st.session_state.chat[lbl] = []
             st.success("🔄 Chat cleared!")
-            # No rerun needed; Streamlit will re-render automatically
-
         if st.button("🗑 Delete", key=f"del_{lbl}"):
             doc_id = st.session_state.docs[lbl]["db_id"]
             with Session(engine) as db:
@@ -166,7 +152,6 @@ for lbl in list(st.session_state.docs.keys()):
             del st.session_state.chat[lbl]
             st.session_state.last_doc = None
             st.success(f"🗑 Deleted '{lbl}' and all data")
-            # No rerun needed; Streamlit will re-render automatically
 
 # ───── Main: Chat Interface ─────
 if st.session_state.docs:
