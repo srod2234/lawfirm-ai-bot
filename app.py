@@ -65,28 +65,39 @@ st.session_state.setdefault("docs", {})
 st.session_state.setdefault("chat", {})
 st.session_state.setdefault("last_doc", None)
 
-# ───── Legacy Text Extract ─────
+# ───── Helper: Extract legacy text ─────
 def extract_text_from_path(path: str) -> str:
     pdf = fitz.open(path)
     return "".join(page.get_text() for page in pdf)
 
-# ───── Load Existing Docs & Index ─────
+# ───── 1) Load existing documents from DB ─────
 with Session(engine) as db:
     all_docs = db.exec(select(DocModel)).all()
 for doc in all_docs:
     label = doc.label
     if label in st.session_state.docs:
         continue
-    text = extract_text_from_path(doc.file_path).strip()
-    if not text:
+    # Load pages (legacy or OCR) for indexing
+    pages = db.exec(
+        select(Page).where(Page.document_id == doc.id).order_by(Page.page_number)
+    ).all()
+    if not pages:
+        # fallback to legacy text extraction
+        text = extract_text_from_path(doc.file_path).strip()
+        if not text:
+            continue
+        pages = [Page(document_id=doc.id, page_number=1, text=text, is_scanned=False)]
+    # Build index
+    chunks = [LIDoc(text=pg.text) for pg in pages if pg.text.strip()]
+    if not chunks:
         continue
     try:
-        idx = VectorStoreIndex.from_documents([LIDoc(text=text)], embed_model=OpenAIEmbedding())
+        idx = VectorStoreIndex.from_documents(chunks, embed_model=OpenAIEmbedding())
     except ValueError:
         continue
-    st.session_state.docs[label] = {"db_id": doc.id, "text": text, "index": idx}
+    st.session_state.docs[label] = {"db_id": doc.id, "pages": pages, "index": idx}
 
-# ───── Load Chat History ─────
+# ───── 2) Load chat history ─────
 with Session(engine) as db:
     for label, payload in st.session_state.docs.items():
         rows = db.exec(select(ChatMessage).where(ChatMessage.doc_id == payload["db_id"])).all()
@@ -102,30 +113,28 @@ if uploaded_file and label and st.sidebar.button("Save PDF"):
     path = f"uploads/{label}.pdf"
     with open(path, "wb") as f:
         f.write(uploaded_file.getbuffer())
+
+    # Ingest via unified pipeline (handles text + scanned)
     with st.spinner("Parsing PDF & running OCR…"):
         doc_id = ingest_pdf(path, owner_id=1)
+
+    # Reload pages
     with Session(engine) as db:
         pages = db.exec(
-            select(Page)
-            .where(Page.document_id == doc_id)
-            .order_by(Page.page_number)
+            select(Page).where(Page.document_id == doc_id).order_by(Page.page_number)
         ).all()
     pages = [pg for pg in pages if pg.text.strip()]
     if not pages:
-        st.error("No text found on any page—cannot build index.")
+        st.error("No text found—cannot build index.")
     else:
-        docs = [LIDoc(text=pg.text) for pg in pages]
+        chunks = [LIDoc(text=pg.text) for pg in pages]
         try:
-            idx = VectorStoreIndex.from_documents(docs, embed_model=OpenAIEmbedding())
+            idx = VectorStoreIndex.from_documents(chunks, embed_model=OpenAIEmbedding())
         except ValueError:
-            st.error("Indexing failed: pages had no content.")
+            st.error("Indexing failed: no content.")
             idx = None
         if idx:
-            st.session_state.docs[label] = {
-                "db_id": doc_id,
-                "text": "\n\n".join(pg.text for pg in pages),
-                "index": idx,
-            }
+            st.session_state.docs[label] = {"db_id": doc_id, "pages": pages, "index": idx}
             st.session_state.chat[label] = []
             st.success(f"📥 Saved & OCR’d '{label}' (db id={doc_id})")
 
@@ -133,51 +142,44 @@ if uploaded_file and label and st.sidebar.button("Save PDF"):
 for lbl in list(st.session_state.docs.keys()):
     with st.sidebar.expander(lbl):
         if st.button("👁 Preview", key=f"prev_{lbl}"):
-            st.sidebar.text_area(
-                "Preview",
-                st.session_state.docs[lbl]["text"][:800] + "…",
-                height=180,
-            )
+            text_preview = "\n\n".join(pg.text for pg in st.session_state.docs[lbl]["pages"])
+            st.sidebar.text_area("Preview", text_preview[:800] + "…", height=180)
         if st.button("♻️ Reset Chat", key=f"reset_{lbl}"):
+            doc_id = st.session_state.docs[lbl]["db_id"]
+            with Session(engine) as db:
+                db.exec(delete(ChatMessage).where(ChatMessage.doc_id == doc_id))
+                db.commit()
             st.session_state.chat[lbl] = []
-            st.session_state.last_doc = lbl
-            st.stop()
+            st.success("🔄 Chat cleared!")
+            st.experimental_rerun()
         if st.button("🗑 Delete", key=f"del_{lbl}"):
             doc_id = st.session_state.docs[lbl]["db_id"]
             with Session(engine) as db:
-                # 1) Attempt to fetch file_path
-                result = db.exec(select(DocModel).where(DocModel.id == doc_id)).one_or_none()
-                file_path = result.file_path if result else None
-                # 2) Delete associated pages
+                # fetch file_path
+                doc = db.exec(select(DocModel).where(DocModel.id == doc_id)).one_or_none()
+                file_path = doc.file_path if doc else None
                 db.exec(delete(Page).where(Page.document_id == doc_id))
-                # 3) Delete associated chat messages
                 db.exec(delete(ChatMessage).where(ChatMessage.doc_id == doc_id))
-                # 4) Delete the document record
                 db.exec(delete(DocModel).where(DocModel.id == doc_id))
                 db.commit()
-
-            # Remove the PDF file if we found the path
             if file_path:
                 try:
                     os.remove(file_path)
                 except OSError:
                     pass
-
-            # Clean up session state
             del st.session_state.docs[lbl]
             del st.session_state.chat[lbl]
             st.session_state.last_doc = None
-            st.success(f"🗑 Deleted '{lbl}' and all its data")
-            st.stop()
+            st.success(f"🗑 Deleted '{lbl}' and all data")
+            st.experimental_rerun()
 
-# ───── Main: Chat UI ─────
+# ───── Main: Chat Interface ─────
 if st.session_state.docs:
     selected = st.selectbox("Choose a document to chat with:", list(st.session_state.docs.keys()))
     st.session_state.last_doc = selected
     payload = st.session_state.docs[selected]
     q_engine = payload["index"].as_query_engine(response_mode="compact", return_source=True)
 
-    # Render history
     for q, a, src in st.session_state.chat[selected]:
         st.markdown(f"**You:** {q}")
         st.markdown(f"**Bot:** {a}")
@@ -186,7 +188,6 @@ if st.session_state.docs:
                 st.code(node.node.get_text().strip(), language="markdown")
         st.markdown("---")
 
-    # New question
     question = st.text_input("Ask a question:", key="chat_input")
     if question:
         with st.spinner("Thinking…"):
