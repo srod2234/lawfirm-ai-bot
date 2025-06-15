@@ -107,7 +107,10 @@ if uploaded_file and label and st.sidebar.button("Save PDF"):
     with st.spinner("Parsing PDF & running OCR…"):
         ingest_pdf(path, owner_id=1)
 
-    # 3) Rerun to pick up the new doc exactly once
+    # 3) Show a confirmation banner
+    st.success(f"✅ Document '{label}' saved successfully!")
+
+    # 4) Rerun to load it exactly once
     try:
         st.experimental_rerun()
     except AttributeError:
