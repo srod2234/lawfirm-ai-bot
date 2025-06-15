@@ -13,6 +13,8 @@ from ingest import ingest_pdf
 from llama_index.core import VectorStoreIndex, Document as LIDoc
 from llama_index.embeddings.openai import OpenAIEmbedding
 
+from analytics import show_dashboard  # <-- Analytics tab
+
 # ───── Page Configuration ─────
 st.set_page_config(page_title="Legal PDF Assistant", layout="wide")
 
@@ -107,77 +109,81 @@ if uploaded_file and label and st.sidebar.button("Save PDF"):
     with st.spinner("Parsing PDF & running OCR…"):
         ingest_pdf(path, owner_id=1)
 
-    # 3) Show a confirmation banner
+    # 3) Confirmation & rerun
     st.success(f"✅ Document '{label}' saved successfully!")
-
-    # 4) Rerun to load it exactly once
     try:
         st.experimental_rerun()
     except AttributeError:
         st.stop()
 
-# ───── Sidebar: Manage Saved Docs ─────
-for lbl in list(st.session_state.docs.keys()):
-    with st.sidebar.expander(lbl):
-        if st.button("👁 Preview", key=f"prev_{lbl}"):
-            text_preview = "\n\n".join(pg.text for pg in st.session_state.docs[lbl]["pages"])
-            st.sidebar.text_area("Preview", text_preview[:800] + "…", height=180)
-        if st.button("♻️ Reset Chat", key=f"reset_{lbl}"):
-            doc_id = st.session_state.docs[lbl]["db_id"]
-            with Session(engine) as db:
-                db.exec(delete(ChatMessage).where(ChatMessage.doc_id == doc_id))
-                db.commit()
-            st.session_state.chat[lbl] = []
-            st.success("🔄 Chat cleared!")
-        if st.button("🗑 Delete", key=f"del_{lbl}"):
-            doc_id = st.session_state.docs[lbl]["db_id"]
-            with Session(engine) as db:
-                doc = db.exec(select(DocModel).where(DocModel.id == doc_id)).one_or_none()
-                file_path = doc.file_path if doc else None
-                db.exec(delete(Page).where(Page.document_id == doc_id))
-                db.exec(delete(ChatMessage).where(ChatMessage.doc_id == doc_id))
-                db.exec(delete(DocModel).where(DocModel.id == doc_id))
-                db.commit()
-            if file_path:
-                try:
-                    os.remove(file_path)
-                except OSError:
-                    pass
-            del st.session_state.docs[lbl]
-            del st.session_state.chat[lbl]
-            st.session_state.last_doc = None
-            st.success(f"🗑 Deleted '{lbl}' and all data")
+# ───── Sidebar: Choose app section ─────
+page = st.sidebar.radio("Go to", ["Chat", "Analytics"])
 
-# ───── Main: Chat Interface ─────
-if st.session_state.docs:
-    selected = st.selectbox("Choose a document to chat with:", list(st.session_state.docs.keys()))
-    st.session_state.last_doc = selected
-    payload = st.session_state.docs[selected]
-    q_engine = payload["index"].as_query_engine(response_mode="compact", return_source=True)
-
-    for q, a, src in st.session_state.chat[selected]:
-        st.markdown(f"**You:** {q}")
-        st.markdown(f"**Bot:** {a}")
-        with st.expander("Sources"):
-            for node in src:
-                st.code(node.node.get_text().strip(), language="markdown")
-        st.markdown("---")
-
-    question = st.text_input("Ask a question:", key="chat_input")
-    if question:
-        with st.spinner("Thinking…"):
-            res = q_engine.query(question)
-        answer, sources = res.response, res.source_nodes
-        with Session(engine) as db:
-            row = ChatMessage(doc_id=payload["db_id"], question=question, answer=answer)
-            db.add(row)
-            db.commit()
-        st.session_state.chat[selected].append((question, answer, sources))
-        st.markdown(f"**You:** {question}")
-        st.markdown(f"**Bot:** {answer}")
-        with st.expander("Sources"):
-            for node in sources:
-                st.code(node.node.get_text().strip(), language="markdown")
-        st.markdown("---")
+if page == "Analytics":
+    show_dashboard()
 else:
-    st.info("Upload a PDF to begin.")
+    # ───── Sidebar: Manage Saved Docs ─────
+    for lbl in list(st.session_state.docs.keys()):
+        with st.sidebar.expander(lbl):
+            if st.button("👁 Preview", key=f"prev_{lbl}"):
+                text_preview = "\n\n".join(pg.text for pg in st.session_state.docs[lbl]["pages"])
+                st.sidebar.text_area("Preview", text_preview[:800] + "…", height=180)
+            if st.button("♻️ Reset Chat", key=f"reset_{lbl}"):
+                doc_id = st.session_state.docs[lbl]["db_id"]
+                with Session(engine) as db:
+                    db.exec(delete(ChatMessage).where(ChatMessage.doc_id == doc_id))
+                    db.commit()
+                st.session_state.chat[lbl] = []
+                st.success("🔄 Chat cleared!")
+            if st.button("🗑 Delete", key=f"del_{lbl}"):
+                doc_id = st.session_state.docs[lbl]["db_id"]
+                with Session(engine) as db:
+                    doc = db.exec(select(DocModel).where(DocModel.id == doc_id)).one_or_none()
+                    file_path = doc.file_path if doc else None
+                    db.exec(delete(Page).where(Page.document_id == doc_id))
+                    db.exec(delete(ChatMessage).where(ChatMessage.doc_id == doc_id))
+                    db.exec(delete(DocModel).where(DocModel.id == doc_id))
+                    db.commit()
+                if file_path:
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass
+                del st.session_state.docs[lbl]
+                del st.session_state.chat[lbl]
+                st.session_state.last_doc = None
+                st.success(f"🗑 Deleted '{lbl}' and all data")
+
+    # ───── Main: Chat Interface ─────
+    if st.session_state.docs:
+        selected = st.selectbox("Choose a document to chat with:", list(st.session_state.docs.keys()))
+        st.session_state.last_doc = selected
+        payload = st.session_state.docs[selected]
+        q_engine = payload["index"].as_query_engine(response_mode="compact", return_source=True)
+
+        for q, a, src in st.session_state.chat[selected]:
+            st.markdown(f"**You:** {q}")
+            st.markdown(f"**Bot:** {a}")
+            with st.expander("Sources"):
+                for node in src:
+                    st.code(node.node.get_text().strip(), language="markdown")
+            st.markdown("---")
+
+        question = st.text_input("Ask a question:", key="chat_input")
+        if question:
+            with st.spinner("Thinking…"):
+                res = q_engine.query(question)
+            answer, sources = res.response, res.source_nodes
+            with Session(engine) as db:
+                row = ChatMessage(doc_id=payload["db_id"], question=question, answer=answer)
+                db.add(row)
+                db.commit()
+            st.session_state.chat[selected].append((question, answer, sources))
+            st.markdown(f"**You:** {question}")
+            st.markdown(f"**Bot:** {answer}")
+            with st.expander("Sources"):
+                for node in sources:
+                    st.code(node.node.get_text().strip(), language="markdown")
+            st.markdown("---")
+    else:
+        st.info("Upload a PDF to begin.")
