@@ -5,7 +5,6 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import fitz  # PyMuPDF
 import openai
-import subprocess
 
 from sqlmodel import Session, select, delete
 from models import init_db, engine, Document as DocModel, ChatMessage, Page
@@ -30,14 +29,6 @@ if not OPENAI_API_KEY:
     st.error("⚠️ OPENAI_API_KEY not set")
     st.stop()
 openai.api_key = OPENAI_API_KEY
-
-# ───── DEBUG: Tesseract version ─────
-try:
-    ver = subprocess.check_output(["tesseract", "--version"], stderr=subprocess.DEVNULL)
-    ver = ver.decode().splitlines()[0]
-    st.sidebar.caption(f"🖋️ Tesseract: {ver}")
-except Exception:
-    st.sidebar.error("⚠️ Tesseract not found")
 
 # ───── Auth Setup ─────
 credentials = {
@@ -116,7 +107,7 @@ if uploaded_file and label and st.sidebar.button("Save PDF"):
     with st.spinner("Parsing PDF & running OCR…"):
         ingest_pdf(path, owner_id=1)
 
-    # 3) Rerun (with fallback to st.stop if unavailable)
+    # 3) Rerun to pick up the new doc exactly once
     try:
         st.experimental_rerun()
     except AttributeError:
