@@ -77,12 +77,10 @@ for doc in all_docs:
     label = doc.label
     if label in st.session_state.docs:
         continue
-    # Load pages for indexing
     pages = db.exec(
         select(Page).where(Page.document_id == doc.id).order_by(Page.page_number)
     ).all()
     if not pages:
-        # fallback to legacy text extraction
         text = extract_text_from_path(doc.file_path).strip()
         if not text:
             continue
@@ -114,12 +112,15 @@ if uploaded_file and label and st.sidebar.button("Save PDF"):
     with open(path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    # 2) Ingest the PDF (text or scanned)
+    # 2) Ingest the PDF
     with st.spinner("Parsing PDF & running OCR…"):
         ingest_pdf(path, owner_id=1)
 
-    # 3) Rerun so startup logic picks up exactly one new doc
-    st.experimental_rerun()
+    # 3) Rerun (with fallback to st.stop if unavailable)
+    try:
+        st.experimental_rerun()
+    except AttributeError:
+        st.stop()
 
 # ───── Sidebar: Manage Saved Docs ─────
 for lbl in list(st.session_state.docs.keys()):
