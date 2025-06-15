@@ -63,9 +63,14 @@ current_role = credentials["usernames"][current_username]["role"]
 st.sidebar.success(f"👋 Welcome, {current_username}!")
 authenticator.logout("sidebar")
 if st.sidebar.button("Logout"):
+    # 1) Clear all session state
     for key in list(st.session_state.keys()):
         del st.session_state[key]
-    st.experimental_rerun()
+    # 2) Rerun or stop
+    if hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+    else:
+        st.stop()
 
 # ───── Session State Defaults ─────
 st.session_state.setdefault("docs", {})
@@ -82,7 +87,6 @@ with Session(engine) as db:
     if current_role == "admin":
         all_docs = db.exec(select(DocModel)).all()
     else:
-        # only this user's docs
         all_docs = db.exec(
             select(DocModel)
             .join(User, DocModel.owner_id == User.id)
@@ -114,7 +118,6 @@ with Session(engine) as db:
     for label, payload in st.session_state.docs.items():
         q = select(ChatMessage).where(ChatMessage.doc_id == payload["db_id"])
         if current_role != "admin":
-            # only this user's messages
             q = q.join(User, ChatMessage.user_id == User.id).where(User.username == current_username)
         rows = db.exec(q).all()
         st.session_state.chat[label] = [(r.question, r.answer, []) for r in rows]
@@ -131,7 +134,6 @@ if uploaded_file and label and st.sidebar.button("Save PDF"):
         f.write(uploaded_file.getbuffer())
 
     with st.spinner("Parsing PDF & running OCR…"):
-        # owner_id is looked up from current user
         owner = next(u.id for u in users if u.username == current_username)
         ingest_pdf(path, owner_id=owner)
 
