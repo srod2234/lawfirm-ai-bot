@@ -22,7 +22,8 @@ st.set_page_config(page_title="Legal PDF Assistant", layout="wide")
 load_dotenv(override=True)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 if not OPENAI_API_KEY:
-    st.error("⚠️ OPENAI_API_KEY not set"); st.stop()
+    st.error("⚠️ OPENAI_API_KEY not set")
+    st.stop()
 openai.api_key = OPENAI_API_KEY
 
 # ───── Init DB ─────
@@ -49,15 +50,22 @@ authenticator = stauth.Authenticate(
 authenticator.login("main")
 status = st.session_state.get("authentication_status")
 if status is False:
-    st.error("❌ Username/password incorrect"); st.stop()
+    st.error("❌ Username/password incorrect")
+    st.stop()
 if status is None:
-    st.warning("ℹ️ Please enter your credentials"); st.stop()
+    st.warning("ℹ️ Please enter your credentials")
+    st.stop()
 
 current_username = st.session_state["name"]
 current_role = credentials["usernames"][current_username]["role"]
 
+# ───── Clear‐state Logout Button ─────
 st.sidebar.success(f"👋 Welcome, {current_username}!")
 authenticator.logout("sidebar")
+if st.sidebar.button("Logout"):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.experimental_rerun()
 
 # ───── Session State Defaults ─────
 st.session_state.setdefault("docs", {})
@@ -74,13 +82,17 @@ with Session(engine) as db:
     if current_role == "admin":
         all_docs = db.exec(select(DocModel)).all()
     else:
-        all_docs = db.exec(select(DocModel).where(DocModel.owner_id == User.id).where(User.username == current_username).join(User)).all()
+        # only this user's docs
+        all_docs = db.exec(
+            select(DocModel)
+            .join(User, DocModel.owner_id == User.id)
+            .where(User.username == current_username)
+        ).all()
 
 for doc in all_docs:
     label = doc.label
     if label in st.session_state.docs:
         continue
-    # load pages
     pages = db.exec(
         select(Page).where(Page.document_id == doc.id).order_by(Page.page_number)
     ).all()
@@ -102,7 +114,8 @@ with Session(engine) as db:
     for label, payload in st.session_state.docs.items():
         q = select(ChatMessage).where(ChatMessage.doc_id == payload["db_id"])
         if current_role != "admin":
-            q = q.where(ChatMessage.user_id == User.id).where(User.username == current_username).join(User)
+            # only this user's messages
+            q = q.join(User, ChatMessage.user_id == User.id).where(User.username == current_username)
         rows = db.exec(q).all()
         st.session_state.chat[label] = [(r.question, r.answer, []) for r in rows]
 
@@ -118,7 +131,9 @@ if uploaded_file and label and st.sidebar.button("Save PDF"):
         f.write(uploaded_file.getbuffer())
 
     with st.spinner("Parsing PDF & running OCR…"):
-        new_doc_id = ingest_pdf(path, owner_id=next(u.id for u in users if u.username == current_username))
+        # owner_id is looked up from current user
+        owner = next(u.id for u in users if u.username == current_username)
+        ingest_pdf(path, owner_id=owner)
 
     st.success(f"✅ Document '{label}' saved!")
     try:
@@ -127,7 +142,8 @@ if uploaded_file and label and st.sidebar.button("Save PDF"):
         st.stop()
 
 # ───── Section Switcher ─────
-page = st.sidebar.radio("Go to", ["Chat", "Analytics"] if current_role == "admin" else ["Chat"])
+options = ["Chat"] + (["Analytics"] if current_role == "admin" else [])
+page = st.sidebar.radio("Go to", options)
 
 if page == "Analytics":
     show_dashboard()
@@ -152,7 +168,10 @@ else:
                     db.exec(delete(ChatMessage).where(ChatMessage.doc_id == doc_id))
                     db.exec(delete(DocModel).where(DocModel.id == doc_id))
                     db.commit()
-                os.remove(st.session_state.docs[lbl]["pages"][0].document.file_path)
+                try:
+                    os.remove(st.session_state.docs[lbl]["pages"][0].document.file_path)
+                except Exception:
+                    pass
                 del st.session_state.docs[lbl]
                 del st.session_state.chat[lbl]
                 st.success(f"🗑 Deleted '{lbl}'")
