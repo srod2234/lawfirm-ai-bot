@@ -5,11 +5,13 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import fitz  # PyMuPDF
 import openai
+import subprocess  # for debugging tesseract availability
 
-from sqlmodel import Session
-from models import init_db, engine, Document as DocModel, ChatMessage
+from sqlmodel import Session, select
+from models import init_db, engine, Document as DocModel, ChatMessage, Page
+from ingest import ingest_pdf
 
-from llama_index.core import VectorStoreIndex, Document
+from llama_index.core import VectorStoreIndex, Document as LIDoc
 from llama_index.embeddings.openai import OpenAIEmbedding
 
 # ───── Page Configuration ─────
@@ -22,13 +24,20 @@ AUTH_PASSWORD_HASH = os.getenv("AUTH_PASSWORD_HASH", "").strip()
 COOKIE_KEY         = os.getenv("COOKIE_KEY", "").strip()
 OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY", "").strip()
 
-# ───── Initialize Database ─────
+# ───── Initialize Database & OpenAI Key ─────
 init_db()
-
 if not OPENAI_API_KEY:
     st.error("⚠️ OPENAI_API_KEY not set in .env or Railway")
     st.stop()
 openai.api_key = OPENAI_API_KEY
+
+# ───── DEBUG: check tesseract in prod ─────
+try:
+    ver = subprocess.check_output(["tesseract", "--version"], stderr=subprocess.DEVNULL)
+    ver = ver.decode().splitlines()[0]
+    st.sidebar.caption(f"🖋️ Tesseract: {ver}")
+except Exception:
+    st.sidebar.error("⚠️ Tesseract not found")
 
 # ───── Auth Setup ─────
 credentials = {
@@ -45,9 +54,11 @@ authenticator = stauth.Authenticate(
 )
 authenticator.login(location="main")
 if st.session_state.get("authentication_status") is False:
-    st.error("❌ Username/password is incorrect"); st.stop()
+    st.error("❌ Username/password is incorrect")
+    st.stop()
 if st.session_state.get("authentication_status") is None:
-    st.warning("ℹ️ Please enter your credentials"); st.stop()
+    st.warning("ℹ️ Please enter your credentials")
+    st.stop()
 st.sidebar.success(f"👋 Welcome, {st.session_state['name']}!")
 authenticator.logout(location="sidebar")
 
@@ -56,32 +67,44 @@ st.session_state.setdefault("docs", {})
 st.session_state.setdefault("chat", {})
 st.session_state.setdefault("last_doc", None)
 
-# ───── Helper to extract text from a PDF file path ─────
+# ───── Helper to extract text from legacy PDFs ─────
 def extract_text_from_path(path: str) -> str:
     pdf = fitz.open(path)
     return "".join(page.get_text() for page in pdf)
 
-# ───── 1) Load all documents from the DB on startup ─────
+# ───── 1) Load all existing documents from the DB ─────
 with Session(engine) as db:
-    all_docs = db.query(DocModel).all()
+    all_docs = db.exec(select(DocModel)).all()
+
 for doc in all_docs:
     label = doc.label
-    if label not in st.session_state.docs:
-        text = extract_text_from_path(doc.file_path)
+    if label in st.session_state.docs:
+        continue
+
+    text = extract_text_from_path(doc.file_path).strip()
+    if not text:
+        continue
+
+    try:
         idx = VectorStoreIndex.from_documents(
-            [Document(text=text)],
+            [LIDoc(text=text)],
             embed_model=OpenAIEmbedding()
         )
-        st.session_state.docs[label] = {
-            "db_id": doc.id,
-            "text": text,
-            "index": idx,
-        }
+    except ValueError:
+        continue
 
-# ───── 2) Load chat history for each doc ─────
+    st.session_state.docs[label] = {
+        "db_id": doc.id,
+        "text": text,
+        "index": idx,
+    }
+
+# ───── 2) Load chat history for each document ─────
 with Session(engine) as db:
     for label, payload in st.session_state.docs.items():
-        rows = db.query(ChatMessage).filter(ChatMessage.doc_id == payload["db_id"]).all()
+        rows = db.exec(
+            select(ChatMessage).where(ChatMessage.doc_id == payload["db_id"])
+        ).all()
         st.session_state.chat[label] = [(r.question, r.answer, []) for r in rows]
 
 # ───── Sidebar: Upload & Manage ─────
@@ -90,29 +113,47 @@ uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
 label = st.sidebar.text_input("Label for this PDF")
 
 if uploaded_file and label and st.sidebar.button("Save PDF"):
-    with st.spinner("Saving & indexing…"):
-        # Persist PDF
-        os.makedirs("uploads", exist_ok=True)
-        path = f"uploads/{label}.pdf"
-        with open(path, "wb") as f:
-            f.write(uploaded_file.read())
+    # 1. Save the raw PDF to disk
+    os.makedirs("uploads", exist_ok=True)
+    path = f"uploads/{label}.pdf"
+    with open(path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
 
-        # Insert into DB
-        with Session(engine) as db:
-            doc = DocModel(owner_id=1, label=label, file_path=path)
-            db.add(doc); db.commit(); db.refresh(doc)
+    # 2. Ingest with OCR → writes Document + Page rows
+    with st.spinner("Parsing PDF & running OCR…"):
+        doc_id = ingest_pdf(path, owner_id=1)  # replace with actual user ID
 
-        # Index
-        text = extract_text_from_path(path)
-        idx = VectorStoreIndex.from_documents(
-            [Document(text=text)],
-            embed_model=OpenAIEmbedding()
-        )
+    # 3. Load OCR’d pages and build a vector index
+    with Session(engine) as db:
+        pages = db.exec(
+            select(Page)
+            .where(Page.document_id == doc_id)
+            .order_by(Page.page_number)
+        ).all()
 
-        st.session_state.docs[label] = {"db_id": doc.id, "text": text, "index": idx}
-        st.session_state.chat[label] = []
+    pages = [pg for pg in pages if pg.text.strip()]
+    if not pages:
+        st.error("No text found on any page—cannot build index.")
+    else:
+        docs = [LIDoc(text=pg.text) for pg in pages]
+        try:
+            idx = VectorStoreIndex.from_documents(
+                docs,
+                embed_model=OpenAIEmbedding()
+            )
+        except ValueError:
+            st.error("Indexing failed: pages had no content.")
+            idx = None
 
-        st.success(f"📥 Saved '{label}' (db id={doc.id})")
+        if idx:
+            # 4. Store in session state
+            st.session_state.docs[label] = {
+                "db_id": doc_id,
+                "text": "\n\n".join(pg.text for pg in pages),
+                "index": idx,
+            }
+            st.session_state.chat[label] = []
+            st.success(f"📥 Saved & OCR’d '{label}' (db id={doc_id})")
 
 # ───── Sidebar: Manage Saved Docs ─────
 for lbl in list(st.session_state.docs.keys()):
@@ -129,7 +170,10 @@ for lbl in list(st.session_state.docs.keys()):
             st.stop()
         if st.button("🗑 Delete", key=f"del_{lbl}"):
             with Session(engine) as db:
-                db.delete(db.query(DocModel).filter(DocModel.id == st.session_state.docs[lbl]["db_id"]).first())
+                obj = db.exec(
+                    select(DocModel).where(DocModel.id == st.session_state.docs[lbl]["db_id"])
+                ).one()
+                db.delete(obj)
                 db.commit()
             try:
                 os.remove(st.session_state.docs[lbl]["file_path"])
@@ -140,14 +184,14 @@ for lbl in list(st.session_state.docs.keys()):
             st.session_state.last_doc = None
             st.stop()
 
-# ───── Main: Chat UI ─────
+# ───── Main: Chat Interface ─────
 if st.session_state.docs:
     selected = st.selectbox("Choose a document to chat with:", list(st.session_state.docs.keys()))
     st.session_state.last_doc = selected
     payload = st.session_state.docs[selected]
     q_engine = payload["index"].as_query_engine(response_mode="compact", return_source=True)
 
-    # Render history
+    # Render chat history
     for q, a, src in st.session_state.chat[selected]:
         st.markdown(f"**You:** {q}")
         st.markdown(f"**Bot:** {a}")
@@ -156,17 +200,18 @@ if st.session_state.docs:
                 st.code(node.node.get_text().strip(), language="markdown")
         st.markdown("---")
 
-    # New question
+    # New question input
     question = st.text_input("Ask a question:", key="chat_input")
     if question:
         with st.spinner("Thinking…"):
             res = q_engine.query(question)
         answer, sources = res.response, res.source_nodes
 
-        # Persist
+        # Persist in DB
         with Session(engine) as db:
             row = ChatMessage(doc_id=payload["db_id"], question=question, answer=answer)
-            db.add(row); db.commit()
+            db.add(row)
+            db.commit()
 
         # Update UI
         st.session_state.chat[selected].append((question, answer, sources))
@@ -176,6 +221,5 @@ if st.session_state.docs:
             for node in sources:
                 st.code(node.node.get_text().strip(), language="markdown")
         st.markdown("---")
-
 else:
     st.info("Upload a PDF to begin.")
