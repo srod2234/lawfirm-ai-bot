@@ -143,12 +143,11 @@ for lbl in list(st.session_state.docs.keys()):
             st.session_state.last_doc = lbl
             st.stop()
         if st.button("🗑 Delete", key=f"del_{lbl}"):
-            # Cascade-delete procedure
             doc_id = st.session_state.docs[lbl]["db_id"]
             with Session(engine) as db:
-                # 1) Fetch file_path before deletion
-                doc = db.exec(select(DocModel).where(DocModel.id == doc_id)).one()
-                file_path = doc.file_path
+                # 1) Attempt to fetch file_path
+                result = db.exec(select(DocModel).where(DocModel.id == doc_id)).one_or_none()
+                file_path = result.file_path if result else None
                 # 2) Delete associated pages
                 db.exec(delete(Page).where(Page.document_id == doc_id))
                 # 3) Delete associated chat messages
@@ -157,11 +156,12 @@ for lbl in list(st.session_state.docs.keys()):
                 db.exec(delete(DocModel).where(DocModel.id == doc_id))
                 db.commit()
 
-            # Remove the PDF file
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
+            # Remove the PDF file if we found the path
+            if file_path:
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
 
             # Clean up session state
             del st.session_state.docs[lbl]
