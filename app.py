@@ -89,52 +89,40 @@ st.sidebar.header("📁 Documents")
 uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
 label = st.sidebar.text_input("Label for this PDF")
 
-# ───── DEBUG LINES ─────
-st.sidebar.write("🔍 Has file?:", uploaded_file is not None)
-st.sidebar.write("🔍 Label text:", repr(label))
+if uploaded_file and label and st.sidebar.button("Save PDF"):
+    with st.spinner("Saving & indexing…"):
+        # Persist PDF
+        os.makedirs("uploads", exist_ok=True)
+        path = f"uploads/{label}.pdf"
+        with open(path, "wb") as f:
+            f.write(uploaded_file.read())
 
-# Always show the button so we can click it even if label is empty
-if st.sidebar.button("Save PDF"):
-    st.sidebar.write("▶️ Save PDF clicked!")
-    if not uploaded_file:
-        st.sidebar.error("⚠️ No file uploaded!")
-    elif not label:
-        st.sidebar.error("⚠️ No label provided!")
-    else:
-        with st.spinner("Saving & indexing…"):
-            # Persist PDF
-            os.makedirs("uploads", exist_ok=True)
-            path = f"uploads/{label}.pdf"
-            with open(path, "wb") as f:
-                f.write(uploaded_file.read())
+        # Insert into DB
+        with Session(engine) as db:
+            doc = DocModel(owner_id=1, label=label, file_path=path)
+            db.add(doc); db.commit(); db.refresh(doc)
 
-            # DEBUG: verify the label value in handler
-            st.sidebar.write("🔍 Label in handler:", label)
+        # Index
+        text = extract_text_from_path(path)
+        idx = VectorStoreIndex.from_documents(
+            [Document(text=text)],
+            embed_model=OpenAIEmbedding()
+        )
 
-            # Insert into DB
-            with Session(engine) as db:
-                doc = DocModel(owner_id=1, label=label, file_path=path)
-                db.add(doc)
-                db.commit()
-                db.refresh(doc)
+        st.session_state.docs[label] = {"db_id": doc.id, "text": text, "index": idx}
+        st.session_state.chat[label] = []
 
-            # Index
-            text = extract_text_from_path(path)
-            idx = VectorStoreIndex.from_documents(
-                [Document(text=text)],
-                embed_model=OpenAIEmbedding()
-            )
-
-            st.session_state.docs[label] = {"db_id": doc.id, "text": text, "index": idx}
-            st.session_state.chat[label] = []
-
-            st.success(f"📥 Saved '{label}' (db id={doc.id})")
+        st.success(f"📥 Saved '{label}' (db id={doc.id})")
 
 # ───── Sidebar: Manage Saved Docs ─────
 for lbl in list(st.session_state.docs.keys()):
     with st.sidebar.expander(lbl):
         if st.button("👁 Preview", key=f"prev_{lbl}"):
-            st.sidebar.text_area("Preview", st.session_state.docs[lbl]["text"][:800] + "…", height=180)
+            st.sidebar.text_area(
+                "Preview",
+                st.session_state.docs[lbl]["text"][:800] + "…",
+                height=180
+            )
         if st.button("♻️ Reset Chat", key=f"reset_{lbl}"):
             st.session_state.chat[lbl] = []
             st.session_state.last_doc = lbl
@@ -178,8 +166,7 @@ if st.session_state.docs:
         # Persist
         with Session(engine) as db:
             row = ChatMessage(doc_id=payload["db_id"], question=question, answer=answer)
-            db.add(row)
-            db.commit()
+            db.add(row); db.commit()
 
         # Update UI
         st.session_state.chat[selected].append((question, answer, sources))
