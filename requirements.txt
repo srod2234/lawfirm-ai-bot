@@ -1,9 +1,9 @@
+pytesseract
 streamlit
-streamlit-authenticator
-openai
-llama-index
-PyMuPDF
-python-dotenv
-bcrypt
 sqlmodel
-psycopg2-binary
+llama-index
+streamlit-authenticator
+python-dotenv
+PyMuPDF
+Pillow
+openai
